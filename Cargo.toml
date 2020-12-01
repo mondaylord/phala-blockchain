@@ -1,3 +1,5 @@
+cargo-features = ["resolver"]
+
 [workspace]
 
 exclude = [
@@ -22,3 +24,5 @@ members = [
 	"rpc",
 	"scripts/toml-upgrade-version"
 ]
+
+resolver = "2"
