@@ -89,7 +89,8 @@ pub struct Query {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ReqData {
-    PendingChainTransfer {sequence: u64}
+    PendingChainTransfer {sequence: u64},
+    PendingKittyTransfer {sequence: u64},
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -109,6 +110,12 @@ pub struct PendingChainTransfer {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "PascalCase")]
+pub struct PendingKittyTransfer {
+    pub pending_kitty_transfer: TransferQueue,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct TransferQueue {
     pub transfer_queue_b64: String,
 }
@@ -124,6 +131,20 @@ pub struct Transfer {
 #[derive(Encode, Decode)]
 pub struct TransferData {
     pub data: Transfer,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[derive(Encode, Decode)]
+pub struct KittyTransfer {
+    pub dest: [u8; 32],
+    pub kitty_id: Vec<u8>,
+    pub sequence: u64,
+}
+#[derive(Serialize, Deserialize, Debug)]
+#[derive(Encode, Decode)]
+pub struct KittyTransferData {
+    pub data: KittyTransfer,
     pub signature: Vec<u8>,
 }
 

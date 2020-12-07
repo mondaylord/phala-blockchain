@@ -17,7 +17,7 @@ mod types;
 use crate::error::Error;
 use crate::types::{
     Runtime, Header, Hash, BlockNumber, RawEvents, StorageProof, RawStorageKey,
-    GetInfoReq, QueryReq, ReqData, Payload, Query, PendingChainTransfer, TransferData,
+    GetInfoReq, QueryReq, ReqData, Payload, Query, PendingChainTransfer, PendingKittyTransfer, TransferData, KittyTransferData,
     InitRuntimeReq, GenesisInfo,
     SyncHeaderReq, SyncHeaderResp, BlockWithEvents, HeaderToSync, AuthoritySet, AuthoritySetChange,
     DispatchBlockReq, DispatchBlockResp, PingReq, /*PingResp,*/ HeartbeatData, /*Heartbeat*/
@@ -377,6 +377,12 @@ async fn get_balances_ingress_seq(client: &XtClient) -> Result<u64, Error> {
     client.fetch_or_default(&runtimes::phala::IngressSequenceStore::new(2), Some(hash)).await.or(Ok(0))
 }
 
+async fn get_kitties_ingress_seq(client: &XtClient) -> Result<u64, Error> {
+    let latest_block = get_block_at(&client, None, false).await?.block;
+    let hash = latest_block.block.header.hash();
+    client.fetch_or_default(&runtimes::kitties::IngressSequenceStore::new(6), Some(hash)).await.or(Ok(0))
+}
+
 async fn update_singer_nonce(client: &XtClient, signer: &mut subxt::PairSigner<Runtime, sr25519::Pair>) -> Result<(), Error>
 {
     let account_id = signer.account_id();
@@ -421,6 +427,56 @@ async fn sync_tx_to_chain(client: &XtClient, pr: &PrClient, sequence: &mut u64, 
         }
 
         let call = runtimes::phala::TransferToChainCall { _runtime: PhantomData, data: transfer_data.encode() };
+        let ret = client.submit(call, &signer).await;
+        if ret.is_ok() {
+            println!("Submit tx successfully");
+        } else {
+            println!("Failed to submit tx: {:?}", ret);
+        }
+        signer.increment_nonce();
+    }
+
+    *sequence = max_seq;
+
+    Ok(())
+}
+
+async fn sync_kitty_to_chain(client: &XtClient, pr: &PrClient, sequence: &mut u64, pair: sr25519::Pair) -> Result<(), Error> {
+    let query = Query {
+        contract_id: 6,
+        nonce: 0,
+        request: ReqData::PendingKittyTransfer {sequence: *sequence},
+    };
+
+    let query_value = serde_json::to_value(&query)?;
+    let payload = Payload::Plain(query_value.to_string());
+    let query_payload = serde_json::to_string(&payload)?;
+    println!("query_payload:{}", query_payload);
+    let info = pr.req_decode("query", QueryReq { query_payload }).await?;
+    println!("info:{:}", info.plain);
+    let pending_kitty_transfer: PendingKittyTransfer = serde_json::from_str(&info.plain)?;
+    let transfer_data = base64::decode(&pending_kitty_transfer.pending_kitty_transfer.transfer_queue_b64)
+        .map_err(|_|Error::FailedToDecode)?;
+    let transfer_queue: Vec<KittyTransferData> = Decode::decode(&mut &transfer_data[..])
+        .map_err(|_|Error::FailedToDecode)?;
+    if transfer_queue.len() == 0 {
+        return Ok(());
+    }
+
+    let mut signer = subxt::PairSigner::<Runtime, _>::new(pair);
+    update_singer_nonce(&client, &mut signer).await?;
+
+    let mut max_seq = *sequence;
+    for transfer_data in &transfer_queue {
+        if transfer_data.data.sequence <= *sequence {
+            println!("The tx has been submitted.");
+            continue;
+        }
+        if transfer_data.data.sequence > max_seq {
+            max_seq = transfer_data.data.sequence;
+        }
+
+        let call = runtimes::kitties::TransferToChainCall { _runtime: PhantomData, data: transfer_data.encode() };
         let ret = client.submit(call, &signer).await;
         if ret.is_ok() {
             println!("Submit tx successfully");
@@ -525,6 +581,7 @@ async fn bridge(args: Args) -> Result<(), Error> {
     }
 
     let mut sequence = get_balances_ingress_seq(&client).await?;
+    let mut kitty_sequence = get_kitties_ingress_seq(&client).await?;
     let mut sync_state = BlockSyncState {
         blocks: Vec::new(),
         authory_set_state: None
@@ -565,6 +622,7 @@ async fn bridge(args: Args) -> Result<(), Error> {
 
         if !args.no_write_back {
             sync_tx_to_chain(&client, &pr, &mut sequence, pair.clone()).await?;
+            sync_kitty_to_chain(&client, &pr, &mut kitty_sequence, pair.clone()).await?;
         }
 
         // send the blocks to pRuntime in batch

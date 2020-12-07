@@ -25,7 +25,7 @@ use node_runtime::{
 	AuthorityDiscoveryConfig, BabeConfig, BalancesConfig, ContractsConfig, CouncilConfig,
 	DemocracyConfig,GrandpaConfig, ImOnlineConfig, SessionConfig, SessionKeys, StakerStatus,
 	StakingConfig, ElectionsConfig, IndicesConfig, SocietyConfig, SudoConfig, SystemConfig,
-	TechnicalCommitteeConfig, PhalaModuleConfig, wasm_binary_unwrap,
+	TechnicalCommitteeConfig, PhalaModuleConfig, KittyStorageConfig, wasm_binary_unwrap,
 };
 use node_runtime::Block;
 use node_runtime::constants::currency::*;
@@ -269,6 +269,10 @@ pub fn testnet_genesis(
 			stakers: initial_authorities.iter().map(|x| {
 				(x.0.clone(), x.1.clone(), dev_ecdsa_pubkey.clone())
 			}).collect(),
+			// Now we have 4 contracts but reserver 10 for convenience
+			contract_keys: std::iter::repeat(dev_ecdsa_pubkey.clone()).take(10).collect(),
+		}),
+		pallet_kitties: Some(KittyStorageConfig {
 			// Now we have 4 contracts but reserver 10 for convenience
 			contract_keys: std::iter::repeat(dev_ecdsa_pubkey).take(10).collect(),
 		}),
