@@ -77,8 +77,8 @@ pub enum Request {
     GetKitty {
         blind_box_id: String,
     },
-    ObserveBox {},
-    ObserveKitty {},
+    ObserveBox,
+    ObserveKitty,
     PendingKittyTransfer {
         sequence: SequenceType,
     },
@@ -140,9 +140,12 @@ impl contracts::Contract<Command, Request, Response> for SubstrateKitties {
                     nonce += 1;
 
                     let blind_box_id = random_hash.to_string();
-                    let new_blind_box = BlindBox { id: blind_box_id.clone() };
+                    let new_blind_box = BlindBox {
+                        id: blind_box_id.clone(),
+                    };
                     println!("New Box: {} is created", blind_box_id.clone());
-                    self.schrodingers.insert(blind_box_id.clone(), kitty_id.to_string());
+                    self.schrodingers
+                        .insert(blind_box_id.clone(), kitty_id.to_string());
                     self.blind_boxes.insert(blind_box_id, new_blind_box);
                 }
                 // Returns TransactionStatus::Ok to indicate a successful transaction
@@ -192,12 +195,12 @@ impl contracts::Contract<Command, Request, Response> for SubstrateKitties {
                     }
                     Err(Error::NotAuthorized)
                 }
-                Request::ObserveBox {} => {
+                Request::ObserveBox => {
                     return Ok(Response::ObserveBox {
                         blind_box: self.blind_boxes.clone(),
                     })
                 }
-                Request::ObserveKitty {} => {
+                Request::ObserveKitty => {
                     return Ok(Response::ObserveKitty {
                         kitty: self.kitties.clone(),
                     })
@@ -229,7 +232,9 @@ impl contracts::Contract<Command, Request, Response> for SubstrateKitties {
                 let dest = AccountIdWrapper(account_id);
                 println!("   dest: {}", dest.to_string());
                 let new_kitty_id = kitty_id.to_string();
-                let new_kitty = Kitty { id: new_kitty_id.clone()};
+                let new_kitty = Kitty {
+                    id: new_kitty_id.clone(),
+                };
                 println!("New kitty : {} is Added!", new_kitty_id);
                 self.kitties.insert(new_kitty_id, new_kitty);
             } else if let chain::pallet_kitties::RawEvent::TransferToChain(
