@@ -196,7 +196,7 @@ lazy_static! {
             contract3: contracts::assets::Assets::new(),
             contract4: contracts::web3analytics::Web3Analytics::new(),
             contract5: contracts::helloworld::HelloWorld::new(),
-            contract6: contracts::substrate_kitties::SubstrateKitties::new(),
+            contract6: contracts::substrate_kitties::SubstrateKitties::new(None),
             light_client: ChainLightValidation::new(),
             main_bridge: 0
         })
@@ -1147,7 +1147,8 @@ fn init_runtime(input: InitRuntimeReq) -> Result<Value, Value> {
         genesis.validator_set_proof)
         .expect("Bridge initialize failed");
     state.main_bridge = bridge_id;
-    state.contract2 = contracts::balance::Balance::new(Some(ecdsa_sk));
+    state.contract2 = contracts::balance::Balance::new(Some(ecdsa_sk.clone()));
+    state.contract6 = contracts::substrate_kitties::SubstrateKitties::new(Some(ecdsa_sk));
     local_state.headernum = 1;
     local_state.blocknum = 1;
 

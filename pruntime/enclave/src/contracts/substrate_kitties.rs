@@ -12,7 +12,7 @@ use parity_scale_codec::{Decode, Encode};
 
 use crate::std::collections::BTreeMap;
 use crate::std::string::String;
-use crate::std::string::ToString;
+use crate::std::format;
 use crate::std::vec::Vec;
 use rand::Rng;
 
@@ -106,8 +106,20 @@ pub enum Response {
 
 impl SubstrateKitties {
     /// Initializes the contract
-    pub fn new() -> Self {
-        Default::default()
+    pub fn new(secret: Option<SecretKey>) -> Self {
+        let schrodingers = BTreeMap::<String, String>::new();
+        let kitties = BTreeMap::<String, Kitty>::new();
+        let blind_boxes = BTreeMap::<String, BlindBox>::new();
+        let opened_box_id=String::from("");
+        SubstrateKitties{
+            schrodingers,
+            kitties,
+            blind_boxes,
+            sequence: 0,
+            queue: Vec::new(),
+            secret,
+            opened_box_id,
+        }
     }
 }
 
@@ -139,13 +151,13 @@ impl contracts::Contract<Command, Request, Response> for SubstrateKitties {
                     let random_hash = Hash::from_slice(&rand_hash);
                     nonce += 1;
 
-                    let blind_box_id = random_hash.to_string();
+                    let blind_box_id = format!("{:#x}", random_hash);
                     let new_blind_box = BlindBox {
                         id: blind_box_id.clone(),
                     };
                     println!("New Box: {} is created", blind_box_id.clone());
                     self.schrodingers
-                        .insert(blind_box_id.clone(), kitty_id.to_string());
+                        .insert(blind_box_id.clone(), (*kitty_id).clone());
                     self.blind_boxes.insert(blind_box_id, new_blind_box);
                 }
                 // Returns TransactionStatus::Ok to indicate a successful transaction
@@ -158,10 +170,11 @@ impl contracts::Contract<Command, Request, Response> for SubstrateKitties {
                     self.opened_box_id = blind_box_id;
                     let sequence = self.sequence + 1;
                     let data = KittyTransfer {
-                        dest: sender,
+                        dest: sender.clone(),
                         kitty_id: (*kitty_id.as_bytes()).to_vec(),
                         sequence,
                     };
+                    println!("ready to transfer the kitty to the owner: {:?}", sender);
 
                     let msg_hash = blake2_256(&Encode::encode(&data));
                     let mut buffer = [0u8; 32];
@@ -190,7 +203,7 @@ impl contracts::Contract<Command, Request, Response> for SubstrateKitties {
                     if blind_box_id == self.opened_box_id {
                         let kitty_id = self.schrodingers.get(&blind_box_id).unwrap();
                         return Ok(Response::GetKitty {
-                            kitty_id: kitty_id.to_string(),
+                            kitty_id: (*kitty_id).clone(),
                         });
                     }
                     Err(Error::NotAuthorized)
@@ -231,7 +244,7 @@ impl contracts::Contract<Command, Request, Response> for SubstrateKitties {
                 println!("Created Kitty {:} from : ModulePallet", kitty_id);
                 let dest = AccountIdWrapper(account_id);
                 println!("   dest: {}", dest.to_string());
-                let new_kitty_id = kitty_id.to_string();
+                let new_kitty_id = format!("{:#x}", kitty_id);
                 let new_kitty = Kitty {
                     id: new_kitty_id.clone(),
                 };
@@ -244,7 +257,7 @@ impl contracts::Contract<Command, Request, Response> for SubstrateKitties {
             ) = pe
             {
                 println!("TransferToChain who: {:?}", account_id);
-                let new_kitty_id = kitty_id.to_string();
+                let new_kitty_id = format!("{:#x}", kitty_id);
                 let transfer_data = KittyTransferData {
                     data: KittyTransfer {
                         dest: AccountIdWrapper(account_id),
