@@ -451,9 +451,9 @@ async fn sync_kitty_to_chain(client: &XtClient, pr: &PrClient, sequence: &mut u6
     let query_value = serde_json::to_value(&query)?;
     let payload = Payload::Plain(query_value.to_string());
     let query_payload = serde_json::to_string(&payload)?;
-    println!("query_payload:{}", query_payload);
+    println!("kitty query_payload:{}", query_payload);
     let info = pr.req_decode("query", QueryReq { query_payload }).await?;
-    println!("info:{:}", info.plain);
+    println!("kitty info:{:}", info.plain);
     let pending_kitty_transfer: PendingKittyTransfer = serde_json::from_str(&info.plain)?;
     let transfer_data = base64::decode(&pending_kitty_transfer.pending_kitty_transfer.transfer_queue_b64)
         .map_err(|_|Error::FailedToDecode)?;
@@ -469,7 +469,7 @@ async fn sync_kitty_to_chain(client: &XtClient, pr: &PrClient, sequence: &mut u6
     let mut max_seq = *sequence;
     for transfer_data in &transfer_queue {
         if transfer_data.data.sequence <= *sequence {
-            println!("The tx has been submitted.");
+            println!("The kitty has been submitted.");
             continue;
         }
         if transfer_data.data.sequence > max_seq {
@@ -479,9 +479,9 @@ async fn sync_kitty_to_chain(client: &XtClient, pr: &PrClient, sequence: &mut u6
         let call = runtimes::kitties::TransferToChainCall { _runtime: PhantomData, data: transfer_data.encode() };
         let ret = client.submit(call, &signer).await;
         if ret.is_ok() {
-            println!("Submit tx successfully");
+            println!("Submit kitty successfully");
         } else {
-            println!("Failed to submit tx: {:?}", ret);
+            println!("Failed to submit kitty: {:?}", ret);
         }
         signer.increment_nonce();
     }

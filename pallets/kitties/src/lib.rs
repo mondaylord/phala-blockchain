@@ -8,7 +8,7 @@ use frame_support::{
 use frame_system::{self as system, ensure_signed};
 use pallet_balances as balances;
 use secp256k1;
-use sp_runtime::{traits::Hash, traits::AccountIdConversion, SaturatedConversion, ModuleId};
+use sp_runtime::{traits::AccountIdConversion, traits::Hash, ModuleId, SaturatedConversion};
 use sp_std::prelude::*;
 
 mod hashing;
@@ -23,14 +23,14 @@ pub struct Kitty<Hash, Balance> {
 }
 
 #[derive(Debug, Clone, Encode, Decode, PartialEq)]
-pub struct KittyTransfer<AccountId, Hash> {
+pub struct KittyTransfer<AccountId> {
     dest: AccountId,
-    kitty_id: Hash,
+    kitty_id: Vec<u8>,
     sequence: u64,
 }
 #[derive(Debug, Clone, Encode, Decode)]
-pub struct KittyTransferData<AccountId, Hash> {
-    data: KittyTransfer<AccountId, Hash>,
+pub struct KittyTransferData<AccountId> {
+    data: KittyTransfer<AccountId>,
     signature: Vec<u8>,
 }
 
@@ -39,9 +39,7 @@ pub trait SignedDataType<T> {
     fn signature(&self) -> T;
 }
 
-impl<AccountId: Encode, Hash: Encode> SignedDataType<Vec<u8>>
-    for KittyTransferData<AccountId, Hash>
-{
+impl<AccountId: Encode> SignedDataType<Vec<u8>> for KittyTransferData<AccountId> {
     fn raw_data(&self) -> Vec<u8> {
         Encode::encode(&self.data)
     }
@@ -78,6 +76,8 @@ decl_error! {
         InvalidInput,
         /// Invalid contract
         InvalidContract,
+        InvalidOwner,
+        InvalidKitty,
     }
 }
 
@@ -154,10 +154,9 @@ decl_module! {
         }
         #[weight = 0]
         fn transfer(origin, to: T::AccountId, kitty_id: T::Hash) -> Result {
-            let sender = ensure_signed(origin)?;
+            let sender = Self::account_id();
 
             let owner = Self::owner_of(kitty_id).ok_or("No owner for this kitty")?;
-            ensure!(owner == sender, "You do not own this kitty");
             let owned_kitty_count_from = Self::owned_kitties_count(&sender);
             let owned_kitty_count_to = Self::owned_kitties_count(&to);
             let new_owned_kitty_count_to = owned_kitty_count_to.checked_add(1)
@@ -196,10 +195,9 @@ decl_module! {
         }
 
         #[weight = 0]
-        fn transfer_to_chain(origin, data: Vec<u8>) -> Result {
+        pub fn transfer_to_chain(origin, data: Vec<u8>) -> Result {
             const CONTRACT_ID: u32 = 6;
-            ensure_signed(origin.clone())?;
-            let transfer_data: KittyTransferData<<T as system::Trait>::AccountId, <T as system::Trait>::Hash> = Decode::decode(&mut &data[..]).map_err(|_| Error::<T>::InvalidInput)?;
+            let transfer_data: KittyTransferData<<T as system::Trait>::AccountId> = Decode::decode(&mut &data[..]).map_err(|_| Error::<T>::InvalidInput)?;
             // Check sequence
             let sequence = IngressSequence::get(CONTRACT_ID);
             ensure!(transfer_data.data.sequence == sequence + 1, Error::<T>::BadMessageSequence);
@@ -212,18 +210,19 @@ decl_module! {
             // Validate TEE signature
             Self::verify_signature(&pubkey, &transfer_data)?;
             // Announce the successful execution
+            let kitty_id: T::Hash = Decode::decode(&mut &new_owner_kitty_id[..]).map_err(|_| Error::<T>::InvalidKitty)?;
+            Self::transfer(origin, new_owner.clone(), kitty_id.clone())?;
             IngressSequence::insert(CONTRACT_ID, sequence + 1);
-            Self::transfer(origin, new_owner.clone(), *new_owner_kitty_id)?;
-            Self::deposit_event(RawEvent::TransferToChain(new_owner.clone(), *new_owner_kitty_id, sequence + 1));
+
+            Self::deposit_event(RawEvent::TransferToChain(transfer_data.data.dest, kitty_id, sequence + 1));
             Ok(())
         }
     }
 }
 impl<T: Trait> Module<T> {
     pub fn account_id() -> T::AccountId {
-		PALLET_ID.into_account()
+        PALLET_ID.into_account()
     }
-    
     pub fn verify_signature(
         serialized_pk: &Vec<u8>,
         data: &impl SignedDataType<Vec<u8>>,

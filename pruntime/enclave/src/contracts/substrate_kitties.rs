@@ -11,8 +11,8 @@ extern crate runtime as chain;
 use parity_scale_codec::{Decode, Encode};
 
 use crate::std::collections::BTreeMap;
-use crate::std::string::String;
 use crate::std::format;
+use crate::std::string::String;
 use crate::std::vec::Vec;
 use rand::Rng;
 
@@ -21,8 +21,8 @@ type SequenceType = u64;
 /// SubstrateKitties contract states.
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct SubstrateKitties {
-    schrodingers: BTreeMap<String, String>,
-    kitties: BTreeMap<String, Kitty>,
+    schrodingers: BTreeMap<String, Vec<u8>>,
+    kitties: BTreeMap<Vec<u8>, Kitty>,
     blind_boxes: BTreeMap<String, BlindBox>,
     sequence: SequenceType,
     queue: Vec<KittyTransferData>,
@@ -38,7 +38,7 @@ pub struct BlindBox {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct Kitty {
-    id: String,
+    id: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Encode, Decode)]
@@ -74,9 +74,6 @@ pub enum Error {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Request {
     /// Open the specific blind box to see the kitty
-    GetKitty {
-        blind_box_id: String,
-    },
     ObserveBox,
     ObserveKitty,
     PendingKittyTransfer {
@@ -88,14 +85,11 @@ pub enum Request {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Response {
     /// Return the kitty_id in the specific blind box
-    GetKitty {
-        kitty_id: String,
-    },
     ObserveBox {
         blind_box: BTreeMap<String, BlindBox>,
     },
     ObserveKitty {
-        kitty: BTreeMap<String, Kitty>,
+        kitty: BTreeMap<Vec<u8>, Kitty>,
     },
     PendingKittyTransfer {
         transfer_queue_b64: String,
@@ -107,11 +101,11 @@ pub enum Response {
 impl SubstrateKitties {
     /// Initializes the contract
     pub fn new(secret: Option<SecretKey>) -> Self {
-        let schrodingers = BTreeMap::<String, String>::new();
-        let kitties = BTreeMap::<String, Kitty>::new();
+        let schrodingers = BTreeMap::<String, Vec<u8>>::new();
+        let kitties = BTreeMap::<Vec<u8>, Kitty>::new();
         let blind_boxes = BTreeMap::<String, BlindBox>::new();
-        let opened_box_id=String::from("");
-        SubstrateKitties{
+        let opened_box_id = String::from("");
+        SubstrateKitties {
             schrodingers,
             kitties,
             blind_boxes,
@@ -155,7 +149,7 @@ impl contracts::Contract<Command, Request, Response> for SubstrateKitties {
                     let new_blind_box = BlindBox {
                         id: blind_box_id.clone(),
                     };
-                    println!("New Box: {} is created", blind_box_id.clone());
+                    println!("New Box: {:?} is created", blind_box_id.clone());
                     self.schrodingers
                         .insert(blind_box_id.clone(), (*kitty_id).clone());
                     self.blind_boxes.insert(blind_box_id, new_blind_box);
@@ -169,12 +163,19 @@ impl contracts::Contract<Command, Request, Response> for SubstrateKitties {
                     let kitty_id = self.schrodingers.get(&blind_box_id).unwrap();
                     self.opened_box_id = blind_box_id;
                     let sequence = self.sequence + 1;
+
+                    let kitty_id = Hash::from_slice(&kitty_id);
+
                     let data = KittyTransfer {
                         dest: sender.clone(),
-                        kitty_id: (*kitty_id.as_bytes()).to_vec(),
+                        kitty_id: kitty_id.clone().encode(),
                         sequence,
                     };
-                    println!("ready to transfer the kitty to the owner: {:?}", sender);
+                    println!(
+                        "ready to transfer the kitty to the owner: {:?}",
+                        sender.to_string()
+                    );
+                    println!("KittyTransfer id encode is {:?}", &data.kitty_id);
 
                     let msg_hash = blake2_256(&Encode::encode(&data));
                     let mut buffer = [0u8; 32];
@@ -198,16 +199,6 @@ impl contracts::Contract<Command, Request, Response> for SubstrateKitties {
     fn handle_query(&mut self, _origin: Option<&chain::AccountId>, req: Request) -> Response {
         let inner = || -> Result<Response, Error> {
             match req {
-                // Handle the `GetKitty` request
-                Request::GetKitty { blind_box_id } => {
-                    if blind_box_id == self.opened_box_id {
-                        let kitty_id = self.schrodingers.get(&blind_box_id).unwrap();
-                        return Ok(Response::GetKitty {
-                            kitty_id: (*kitty_id).clone(),
-                        });
-                    }
-                    Err(Error::NotAuthorized)
-                }
                 Request::ObserveBox => {
                     return Ok(Response::ObserveBox {
                         blind_box: self.blind_boxes.clone(),
@@ -241,15 +232,15 @@ impl contracts::Contract<Command, Request, Response> for SubstrateKitties {
     fn handle_event(&mut self, ce: chain::Event) {
         if let chain::Event::pallet_kitties(pe) = ce {
             if let chain::pallet_kitties::RawEvent::Created(account_id, kitty_id) = pe {
-                println!("Created Kitty {:} from : ModulePallet", kitty_id);
+                println!("Created Kitty {:?} from : ModulePallet", kitty_id);
                 let dest = AccountIdWrapper(account_id);
                 println!("   dest: {}", dest.to_string());
-                let new_kitty_id = format!("{:#x}", kitty_id);
+                let new_kitty_id = kitty_id.to_fixed_bytes();
                 let new_kitty = Kitty {
-                    id: new_kitty_id.clone(),
+                    id: new_kitty_id.to_vec(),
                 };
-                println!("New kitty : {} is Added!", new_kitty_id);
-                self.kitties.insert(new_kitty_id, new_kitty);
+                println!("New kitty : {:?} is Added!", new_kitty_id.clone());
+                self.kitties.insert(new_kitty_id.to_vec(), new_kitty);
             } else if let chain::pallet_kitties::RawEvent::TransferToChain(
                 account_id,
                 kitty_id,
@@ -258,10 +249,11 @@ impl contracts::Contract<Command, Request, Response> for SubstrateKitties {
             {
                 println!("TransferToChain who: {:?}", account_id);
                 let new_kitty_id = format!("{:#x}", kitty_id);
+                println!("Kitty: {} is transerferred!!", new_kitty_id);
                 let transfer_data = KittyTransferData {
                     data: KittyTransfer {
                         dest: AccountIdWrapper(account_id),
-                        kitty_id: new_kitty_id.as_bytes().to_vec(),
+                        kitty_id: kitty_id.encode(),
                         sequence,
                     },
                     signature: Vec::new(),
