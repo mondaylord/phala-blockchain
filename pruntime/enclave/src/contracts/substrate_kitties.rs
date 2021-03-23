@@ -4,9 +4,12 @@ use crate::contracts;
 use crate::contracts::AccountIdWrapper;
 use crate::types::TxRef;
 use crate::TransactionStatus;
+use lazy_static;
 use secp256k1::{Message, SecretKey};
+use sp_core::hashing::blake2_128;
 use sp_core::hashing::blake2_256;
 use sp_core::H256 as Hash;
+use sp_core::U256;
 extern crate runtime as chain;
 use parity_scale_codec::{Decode, Encode};
 
@@ -16,9 +19,22 @@ use crate::std::string::String;
 use crate::std::vec::Vec;
 use rand::Rng;
 
+const ALICE: &'static str = "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d";
+// 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY
+const BOB: &'static str = "8eaf04151687736326c9fea17e25fc5287613693c912909cb226aa4794f26a48";
+// 5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty
+const CHARLIE: &'static str = "90b5ab205c6974c9ea841be688864633dc9ca8a357843eeacf2314649965fe22";
+// 5FLSigC9HGRKVhB9FiEo4Y3koPsNmBmLJbpXg2mp1hXcS59Y
 type SequenceType = u64;
-/// Default owner for the initial blind boxes
-const BOX_ID: &str = "PHALA BOX!";
+
+lazy_static! {
+    // 10000...000, used to tell if this is a NFT
+    static ref TYPE_NF_BIT: U256 = U256::from(1) << 255;
+    // 1111...11000...00, used to store the type in the upper 128 bits
+    static ref TYPE_MASK: U256 = U256::from(!u128::MIN) << 128;
+    // 00...00011....11, used to get NFT index in the lower 128 bits
+    static ref NF_INDEX_MASK: U256 = U256::from(!u128::MIN);
+}
 
 /// SubstrateKitties contract states.
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
@@ -27,8 +43,13 @@ pub struct SubstrateKitties {
     /// Use Vec<u8> to represent kitty id
     kitties: BTreeMap<Vec<u8>, Kitty>,
     blind_boxes: BTreeMap<String, BlindBox>,
+    /// Record the NFT's owner, if we introduce FT later, this field can be moved
+    owner: BTreeMap<String, AccountIdWrapper>,
+    /// Record the balance of an account's tokens, the first index is a tuple consists of tokenId and accountId
+    /// the second index is the balance, for NFT it's always 1, for FT, it can be any number
+    balances: BTreeMap<(String, AccountIdWrapper), chain::Balance>,
     /// Record the boxes list which the owners own
-    owned_blind_boxes: BTreeMap<String, Vec<String>>,
+    owned_boxes: BTreeMap<AccountIdWrapper, Vec<String>>,
     sequence: SequenceType,
     queue: Vec<KittyTransferData>,
     #[serde(skip)]
@@ -41,7 +62,8 @@ pub struct SubstrateKitties {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct BlindBox {
-    id: String,
+    // Use String to store the U256 type ID, preventing the Serialize implementation
+    blind_box_id: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -67,6 +89,8 @@ pub struct KittyTransferData {
 pub enum Command {
     /// Pack the kitties into the corresponding blind boxes
     Pack {},
+    /// Transfer the box to another account, need to judge if the sender is the owner
+    Transfer { dest: String, blind_box_id: String },
     /// Open the specific blind box to get the kitty
     Open { blind_box_id: String },
 }
@@ -87,6 +111,11 @@ pub enum Request {
     ObserveOwnedBox,
     /// Users can require to see the kitties which are not in the boxes
     ObserveLeftKitties,
+    /// Users can require to know the owner of the specific box(NFT only)
+    OwnerOf {
+        blind_box_id: String,
+    },
+
     PendingKittyTransfer {
         sequence: SequenceType,
     },
@@ -104,6 +133,9 @@ pub enum Response {
     ObserveLeftKitties {
         kitties: Vec<Vec<u8>>,
     },
+    OwnerOf {
+        owner: AccountIdWrapper,
+    },
     PendingKittyTransfer {
         transfer_queue_b64: String,
     },
@@ -117,12 +149,16 @@ impl SubstrateKitties {
         let schrodingers = BTreeMap::<String, Vec<u8>>::new();
         let kitties = BTreeMap::<Vec<u8>, Kitty>::new();
         let blind_boxes = BTreeMap::<String, BlindBox>::new();
-        let owned_blind_boxes = BTreeMap::<String, Vec<String>>::new();
+        let owner = BTreeMap::<String, AccountIdWrapper>::new();
+        let balances = BTreeMap::<(String, AccountIdWrapper), chain::Balance>::new();
+        let owned_boxes = BTreeMap::<AccountIdWrapper, Vec<String>>::new();
         SubstrateKitties {
             schrodingers,
             kitties,
             blind_boxes,
-            owned_blind_boxes,
+            owner,
+            balances,
+            owned_boxes,
             sequence: 0,
             queue: Vec::new(),
             secret,
@@ -152,42 +188,102 @@ impl contracts::Contract<Command, Request, Response> for SubstrateKitties {
                 // indeed some kitties that need to be packed
                 if !self.left_kitties.is_empty() {
                     let mut nonce = 1;
-                    let mut boxes_list = Vec::new();
+                    let _sender = AccountIdWrapper(_origin.clone());
+                    // This indicates the token's kind, let's just suppose that 1 represents box,
+                    // maybe if we introduce more tokens later, this can be formulated strictly
+                    let kind = 1;
+                    // For now, the token id is 0....01000...000, this will be used to construct the
+                    // box ID below, combined with random index id and NFT flags
+                    let token_id: U256 = U256::from(kind) << 128;
+                    // Let's just suppose that ALICE owns all the boxes as default, and ALICE can
+                    // transfer to anyone that is on the chain
+                    let default_owner = AccountIdWrapper::from_hex(ALICE);
                     for (kitty_id, _kitty) in self.kitties.iter() {
-                        let sender = AccountIdWrapper(_origin.clone());
                         let mut rng = rand::thread_rng();
-                        let seed: [u8; 32] = rng.gen();
-                        // generate hash number as ID to create blind boxes
-                        let raw_data = (seed, &sender, nonce);
-                        let hash_data = blake2_256(&Encode::encode(&raw_data));
-                        let random_hash = Hash::from_slice(&hash_data);
+                        let seed: [u8; 16] = rng.gen();
+                        let raw_data = (seed, nonce, &kitty_id);
                         nonce += 1;
-
-                        let blind_box_id = format!("{:#x}", random_hash);
+                        let hash_data = blake2_128(&Encode::encode(&raw_data));
+                        let index_id = u128::from_be_bytes(hash_data);
+                        let nft_id = (token_id + index_id) | *TYPE_NF_BIT;
+                        let blind_box_id = format!("{:#x}", nft_id);
                         let new_blind_box = BlindBox {
-                            id: blind_box_id.clone(),
+                            blind_box_id: blind_box_id.clone(),
                         };
-                        println!("New Box: {:?} is created", blind_box_id.clone());
-
+                        let mut box_list = match self.owned_boxes.get(&default_owner) {
+                            Some(_) => self.owned_boxes.get(&default_owner).unwrap().clone(),
+                            None => Vec::new(),
+                        };
+                        box_list.push(blind_box_id.clone());
+                        if nft_id & *TYPE_NF_BIT == *TYPE_NF_BIT {
+                            // is NFT
+                            self.owned_boxes.insert(default_owner.clone(), box_list);
+                            self.owner
+                                .insert(blind_box_id.clone(), default_owner.clone());
+                            self.balances
+                                .insert((blind_box_id.clone(), default_owner.clone()), 1);
+                        } else if nft_id & *TYPE_NF_BIT == U256::from(0) {
+                            // is FT
+                            let mut ft_balance = match self
+                                .balances
+                                .get(&(blind_box_id.clone(), default_owner.clone()))
+                            {
+                                Some(_) => self
+                                    .balances
+                                    .get(&(blind_box_id.clone(), default_owner.clone()))
+                                    .unwrap()
+                                    .clone(),
+                                None => 0,
+                            };
+                            ft_balance += 1;
+                            self.balances
+                                .insert((blind_box_id.clone(), default_owner.clone()), ft_balance);
+                        }
                         self.schrodingers
                             .insert(blind_box_id.clone(), (*kitty_id).clone());
                         self.blind_boxes.insert(blind_box_id.clone(), new_blind_box);
-                        boxes_list.push(blind_box_id);
                     }
                     // After this, new kitties are all packed into boxes
                     self.left_kitties.clear();
+                }
+                // Returns TransactionStatus::Ok to indicate a successful transaction
+                TransactionStatus::Ok
+            }
+            Command::Transfer { dest, blind_box_id } => {
+                // TODO: check owner & dest not overflow & sender not underflow
+                let sender = AccountIdWrapper(_origin.clone());
+                let original_owner = self.owner.get(&blind_box_id).unwrap().clone();
+                let reciever = AccountIdWrapper::from_hex(&dest);
+                if sender == original_owner {
+                    println!(
+                        "Transfer: [{}] -> [{}]: {}",
+                        sender.to_string(),
+                        dest,
+                        blind_box_id
+                    );
+                    self.owner.insert(blind_box_id.clone(), reciever.clone());
 
-                    // For now, boxes all belong to the default 'PHALA_BOX!'
-                    self.owned_blind_boxes
-                        .insert(String::from(BOX_ID), boxes_list);
+                    let mut box_list = self.owned_boxes.get(&sender).unwrap().clone();
+                    box_list.retain(|x| x != &blind_box_id);
+                    self.owned_boxes.insert(sender, box_list);
+
+                    // Add this opened box to the new owner
+                    let mut new_owned_list = match self.owned_boxes.get(&reciever) {
+                        Some(_) => self.owned_boxes.get(&reciever).unwrap().clone(),
+                        None => Vec::new(),
+                    };
+                    new_owned_list.push(blind_box_id);
+                    self.owned_boxes.insert(reciever, new_owned_list);
                 }
                 // Returns TransactionStatus::Ok to indicate a successful transaction
                 TransactionStatus::Ok
             }
             Command::Open { blind_box_id } => {
                 let sender = AccountIdWrapper(_origin.clone());
+                let original_owner = self.owner.get(&blind_box_id).unwrap().clone();
                 // Open the box if it's legal and not opened yet
-                if self.schrodingers.contains_key(&blind_box_id)
+                if sender == original_owner
+                    && self.schrodingers.contains_key(&blind_box_id)
                     && !self.opend_boxes.contains(&blind_box_id)
                 {
                     // Get the kitty based on blind_box_id
@@ -203,27 +299,7 @@ impl contracts::Contract<Command, Request, Response> for SubstrateKitties {
                         sequence,
                     };
 
-                    let mut box_list = self
-                        .owned_blind_boxes
-                        .get(&String::from(BOX_ID))
-                        .unwrap()
-                        .clone();
-                    // Remove the box from the default owned boxes list
-                    box_list.retain(|x| x != &blind_box_id);
-                    // Now the original boxes list is decreased by 1
-                    self.owned_blind_boxes
-                        .insert(String::from(BOX_ID), box_list);
-
                     self.opend_boxes.push(blind_box_id.clone());
-
-                    // Add this opened box to the new owner
-                    let new_owner = sender.to_string();
-                    let mut new_owned_list = match self.owned_blind_boxes.get(&new_owner) {
-                        Some(_) => self.owned_blind_boxes.get(&new_owner).unwrap().clone(),
-                        None => Vec::new(),
-                    };
-                    new_owned_list.push(blind_box_id);
-                    self.owned_blind_boxes.insert(new_owner, new_owned_list);
 
                     let msg_hash = blake2_256(&Encode::encode(&data));
                     let mut buffer = [0u8; 32];
@@ -254,8 +330,7 @@ impl contracts::Contract<Command, Request, Response> for SubstrateKitties {
                 }
                 Request::ObserveOwnedBox => {
                     let sender = AccountIdWrapper(_origin.unwrap().clone());
-                    let owner = sender.to_string();
-                    let owned_boxes = self.owned_blind_boxes.get(&owner);
+                    let owned_boxes = self.owned_boxes.get(&sender);
                     match owned_boxes {
                         Some(_) => {
                             return Ok(Response::ObserveOwnedBox {
@@ -272,6 +347,11 @@ impl contracts::Contract<Command, Request, Response> for SubstrateKitties {
                 Request::ObserveLeftKitties => {
                     return Ok(Response::ObserveLeftKitties {
                         kitties: self.left_kitties.clone(),
+                    })
+                }
+                Request::OwnerOf { blind_box_id } => {
+                    return Ok(Response::OwnerOf {
+                        owner: self.owner.get(&blind_box_id).unwrap().clone(),
                     })
                 }
                 Request::PendingKittyTransfer { sequence } => {
