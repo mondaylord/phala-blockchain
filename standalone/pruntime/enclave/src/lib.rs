@@ -71,8 +71,8 @@ mod system;
 mod types;
 
 use contracts::{
-    AccountIdWrapper, Contract, ContractId, ASSETS, BALANCES, DATA_PLAZA, DIEM, SYSTEM,
-    WEB3_ANALYTICS, SUBSTRATE_KITTIES, BTC_LOTTERY
+    AccountIdWrapper, Contract, ContractId, ASSETS, BALANCES, BTC_LOTTERY, DATA_PLAZA, DIEM,
+    SUBSTRATE_KITTIES, SYSTEM, WEB3_ANALYTICS,
 };
 use cryptography::{aead, ecdh};
 use light_validation::AuthoritySetChange;
@@ -663,6 +663,7 @@ const ACTION_GET_RUNTIME_INFO: u8 = 10;
 const ACTION_SET: u8 = 21;
 const ACTION_GET: u8 = 22;
 const ACTION_TEST_INK: u8 = 100;
+const ACTION_TEST_LOTTERY: u8 = 200;
 
 #[no_mangle]
 pub extern "C" fn ecall_set_state(input_ptr: *const u8, input_len: usize) -> sgx_status_t {
@@ -707,6 +708,7 @@ pub extern "C" fn ecall_handle(
                 ACTION_SET => set(payload),
                 ACTION_GET_RUNTIME_INFO => get_runtime_info(payload),
                 ACTION_TEST_INK => test_ink(payload),
+                ACTION_TEST_LOTTERY => test_lottery(payload),
                 _ => unknown(),
             }
         }
@@ -1215,11 +1217,11 @@ fn handle_execution(
             _ => TransactionStatus::BadCommand,
         },
         SUBSTRATE_KITTIES => match serde_json::from_slice(inner_data.as_slice()) {
-            Ok(cmd) => state.contract6.handle_command(&origin, pos,cmd),
+            Ok(cmd) => state.contract6.handle_command(&origin, pos, cmd),
             _ => TransactionStatus::BadCommand,
         },
         BTC_LOTTERY => match serde_json::from_slice(inner_data.as_slice()) {
-            Ok(cmd) => state.contract7.handle_command(&origin, pos,cmd),
+            Ok(cmd) => state.contract7.handle_command(&origin, pos, cmd),
             _ => TransactionStatus::BadCommand,
         },
         _ => {
@@ -1458,10 +1460,10 @@ fn handle_events(
                     state.contract2.handle_event(evt.event.clone());
                 }
             }
-        } else if let chain::Event::pallet_kitties(pe) = &evt.event{
+        } else if let chain::Event::pallet_kitties(pe) = &evt.event {
             println!("pallet_kitties event: {:?}", pe);
             state.contract6.handle_event(evt.event.clone());
-        } else if let chain::Event::pallet_bridge_transfer(pe) = &evt.event{
+        } else if let chain::Event::pallet_bridge_transfer(pe) = &evt.event {
             println!("pallet_bridge_transfer event: {:?}", pe);
             state.contract7.handle_event(evt.event.clone());
         }
@@ -1580,6 +1582,62 @@ fn get_runtime_info(_input: &Map<String, Value>) -> Result<Value, Value> {
         .as_ref()
         .ok_or_else(|| error_msg("Uninitiated runtime info"))?;
     Ok(serde_json::to_value(resp).unwrap())
+}
+
+fn test_lottery(_input: &Map<String, Value>) -> Result<Value, Value> {
+    info!("=======Begin Lottery Contract Test======");
+    let round_id: u32 = 1;
+    let total_count: u32 = 100;
+    let winner_count: u32 = 5;
+    let mut state = STATE.lock().unwrap();
+    let alice = String::from("d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d");
+    let origin = {
+        let owner = contracts::account_id_from_hex(&alice).map_err(|_| error_msg("Bad origin"))?;
+        Some(owner)
+    };
+    let msg = "{
+        \"contract_id\": 7,
+        \"nonce\": 0,
+        \"request\":{\"TestBtcNewRound\":{\"round_id\": 1, \"total_count\": 100, \"winner_count\": 1}}
+    }".as_bytes();
+    let msg3 = "{
+        \"contract_id\": 7,
+        \"nonce\": 0,
+        \"request\":{\"TestBtcOpenLottery\":{\"round_id\": 1}}
+    }"
+    .as_bytes();
+    let msg2 = "{
+        \"contract_id\": 7,
+        \"nonce\": 0,
+        \"request\":{\"GetRoundAddress\":{\"round_id\": 1}}
+    }"
+    .as_bytes();
+    let opaque_query: types::OpaqueQuery =
+        serde_json::from_slice(&msg).map_err(|_| error_msg("Malformed request1 (Query)"))?;
+    let opaque_query2: types::OpaqueQuery =
+        serde_json::from_slice(&msg2).map_err(|_| error_msg("Malformed request2 (Query)"))?;
+    let opaque_query3: types::OpaqueQuery =
+        serde_json::from_slice(&msg3).map_err(|_| error_msg("Malformed request3 (Query)"))?;
+    let res = state.contract7.handle_query(
+        origin.as_ref(),
+        types::deopaque_query(opaque_query)
+            .map_err(|_| error_msg("Malformed request1 (btc_lottery::Request)"))?
+            .request,
+    );
+    let res2 = state.contract7.handle_query(
+        origin.as_ref(),
+        types::deopaque_query(opaque_query2)
+            .map_err(|_| error_msg("Malformed request2 (btc_lottery::Request)"))?
+            .request,
+    );
+    let res3 = state.contract7.handle_query(
+        origin.as_ref(),
+        types::deopaque_query(opaque_query3)
+            .map_err(|_| error_msg("Malformed request3 (btc_lottery::Request)"))?
+            .request,
+    );
+
+    Ok(serde_json::to_value(res3).unwrap())
 }
 
 fn test_ink(_input: &Map<String, Value>) -> Result<Value, Value> {

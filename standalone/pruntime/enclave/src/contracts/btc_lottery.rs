@@ -1,9 +1,11 @@
 use crate::contracts;
 use crate::contracts::AccountIdWrapper;
+use anyhow::Result;
 use bitcoin;
 use bitcoin::blockdata::script::Builder;
 use bitcoin::blockdata::transaction::{OutPoint, SigHashType, TxIn, TxOut};
 use bitcoin::consensus::encode::serialize;
+use bitcoin::hashes::hex::{FromHex, ToHex};
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::{All, Message, Secp256k1, Signature};
 use bitcoin::util::bip32::ExtendedPrivKey;
@@ -98,11 +100,27 @@ pub enum Error {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Request {
     GetAllRounds,
-    GetRoundInfo { round_id: u32 },
-    GetRoundAddress { round_id: u32 },
-    QueryUtxo { round_id: u32 },
+    GetRoundInfo {
+        round_id: u32,
+    },
+    GetRoundAddress {
+        round_id: u32,
+    },
+    QueryUtxo {
+        round_id: u32,
+    },
     // GetSignedTx { round_id: u32 },
-    PendingLotteryEgress { sequence: SequenceType },
+    PendingLotteryEgress {
+        sequence: SequenceType,
+    },
+    TestBtcNewRound {
+        round_id: u32,
+        total_count: u32,
+        winner_count: u32,
+    },
+    TestBtcOpenLottery {
+        round_id: u32,
+    },
 }
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Response {
@@ -114,7 +132,7 @@ pub enum Response {
         winner_count: u32,
     },
     GetRoundAddress {
-        prize_addr: Vec<String>,
+        prize_addr: BTreeMap<String, String>,
     },
     QueryUtxo {
         utxo: BTreeMap<Address, (Txid, u32, u64)>,
@@ -124,6 +142,12 @@ pub enum Response {
         lottery_queue_b64: String,
     },
     Error(Error),
+    TestBtcNewRound {
+        message: String,
+    },
+    TestBtcOpenLottery {
+        message: String,
+    },
 }
 
 impl BtcLottery {
@@ -294,7 +318,7 @@ impl BtcLottery {
                     // TODO: deal with fee
                     output: vec![TxOut {
                         script_pubkey: target.script_pubkey(),
-                        value: *amount,
+                        value: *amount - 2500,
                     }],
                     lock_time: 0,
                     version: 2,
@@ -426,20 +450,16 @@ impl contracts::Contract<Command, Request, Response> for BtcLottery {
             }
             Request::GetRoundAddress { round_id } => {
                 if self.lottery_set.contains_key(&round_id) {
-                    let temp = self
+                    let mut prize_addr = BTreeMap::new();
+                    for (token_id, sk) in self
                         .lottery_set
                         .get(&round_id)
-                        .expect("round_id is known in the lottery_set; qed");
-                    let mut address_set = Vec::new();
-                    for (_, private_key) in temp.iter() {
-                        let secp = Secp256k1::new();
-                        let public_key = PublicKey::from_private_key(&secp, &private_key);
-                        let prize_addr = Address::p2pkh(&public_key, Network::Bitcoin);
-                        address_set.push(prize_addr.to_string());
+                        .expect("round_id is known in the lottery_set; qed")
+                        .iter()
+                    {
+                        prize_addr.insert(token_id.to_string(), sk.to_string());
                     }
-                    Response::GetRoundAddress {
-                        prize_addr: address_set,
-                    }
+                    Response::GetRoundAddress { prize_addr }
                 } else {
                     Response::Error(Error::InvalidRequest)
                 }
@@ -467,6 +487,115 @@ impl contracts::Contract<Command, Request, Response> for BtcLottery {
 
                 Response::PendingLotteryEgress {
                     lottery_queue_b64: base64::encode(&transfer_queue.encode()),
+                }
+            }
+            Request::TestBtcNewRound {
+                round_id,
+                total_count,
+                winner_count,
+            } => {
+                if !self.token_set.contains_key(&round_id)
+                    && !self.lottery_set.contains_key(&round_id)
+                {
+                    let secret = match self.secret.as_ref() {
+                        Some(s) => s.to_raw_vec(),
+                        None => String::from("ssafjahfjer6237gdfsd6324e")
+                            .as_bytes()
+                            .to_vec(),
+                    };
+                    let token_id: U256 = U256::from(round_id) << 128;
+                    let mut round_token = Vec::new();
+                    for index_id in 1..=total_count {
+                        let nft_id = (token_id + index_id) | *TYPE_NF_BIT;
+                        let token_id = format!("{:#x}", nft_id);
+                        round_token.push(token_id);
+                    }
+                    let mut lottery_token = BTreeMap::<String, PrivateKey>::new();
+                    let raw_seed = blake2_256(&Encode::encode(&(secret, round_id)));
+                    let mut r: StdRng = SeedableRng::from_seed(raw_seed.clone());
+                    let sample = round_token
+                        .iter()
+                        .choose_multiple(&mut r, winner_count as usize);
+                    let mut salt = round_id * 10000;
+                    for winner_id in sample {
+                        let s = Secp256k1::new();
+                        let raw_data = (raw_seed.clone(), salt);
+                        let seed = blake2_256(&Encode::encode(&raw_data));
+                        let sk = match ExtendedPrivKey::new_master(Network::Testnet, &seed) {
+                            Ok(e) => e.private_key,
+                            Err(err) => {
+                                error!(
+                                "LotteryNewRound: cannot create a new secret key from the seed: {:?}",
+                                &seed
+                            );
+                                return Response::TestBtcNewRound {
+                                    message: String::from("fail"),
+                                };
+                            }
+                        };
+                        lottery_token.insert(String::from(winner_id), sk);
+                        salt += 1;
+                    }
+                    self.lottery_set.insert(round_id, lottery_token);
+                    self.token_set.insert(round_id, round_token);
+                    self.round_id = round_id;
+                }
+                Response::TestBtcNewRound {
+                    message: String::from("success"),
+                }
+            }
+            Request::TestBtcOpenLottery { round_id } => {
+                let btc_address = String::from("n4hLR9z9epBEUemysyQ9zfwJ92NdaBYgEg");
+                let target = match Address::from_str(&btc_address) {
+                    Ok(e) => e,
+                    Err(error) => return Response::Error(Error::InvalidRequest),
+                };
+                let sequence = self.sequence + 1;
+                let secp = Secp256k1::new();
+                let private_key: PrivateKey =
+                    PrivateKey::from_wif("cNzD7CEJaLdeEVm6MiRRCMp4YhdWDdhSmVt9seJrtw4sDkAjT1Z3")
+                        .unwrap();
+                let public_key = PublicKey::from_private_key(&secp, &private_key);
+                let prize_addr = Address::p2pkh(&public_key, Network::Testnet);
+                let txid: Txid = Txid::from_hex(
+                    "031ed8214f9abf763be82a5b1bc35f42b72449bb1788f6d45a793c6afcff7a72",
+                )
+                .unwrap();
+                let vout = 1;
+                let amount = 10000;
+                let mut tx = Transaction {
+                    input: vec![TxIn {
+                        previous_output: OutPoint { txid, vout },
+                        sequence: RBF,
+                        witness: Vec::new(),
+                        script_sig: Script::new(),
+                    }],
+                    // TODO: deal with fee
+                    output: vec![TxOut {
+                        script_pubkey: target.script_pubkey(),
+                        value: amount - 2500,
+                    }],
+                    lock_time: 0,
+                    version: 2,
+                };
+                let sighash =
+                    tx.signature_hash(0, &prize_addr.script_pubkey(), SigHashType::All.as_u32());
+                let secp_sign: Secp256k1<All> = Secp256k1::<All>::new();
+                let tx_sign = match Self::sign(&secp_sign, &sighash[..], &private_key) {
+                    Ok(e) => e.serialize_der(),
+                    Err(err) => return Response::Error(Error::InvalidRequest),
+                };
+                let mut with_hashtype = tx_sign.to_vec();
+                with_hashtype.push(SigHashType::All.as_u32() as u8);
+                tx.input[0].script_sig = Builder::new()
+                    .push_slice(with_hashtype.as_slice())
+                    .push_slice(public_key.to_bytes().as_slice())
+                    .into_script();
+                tx.input[0].witness.clear();
+                let tx_bytes = serialize(&tx);
+                self.sequence = sequence;
+                Response::TestBtcOpenLottery {
+                    message: tx_bytes.to_hex(),
                 }
             }
         }

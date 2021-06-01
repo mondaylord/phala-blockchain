@@ -774,6 +774,46 @@ fn test_ink(contract_input: Json<ContractInput>) -> JsonValue {
     }
 }
 
+#[post("/test_lottery", format = "json", data = "<contract_input>")]
+fn test_lottery(contract_input: Json<ContractInput>) -> JsonValue {
+    debug!("{}", ::serde_json::to_string_pretty(&*contract_input).unwrap());
+
+    let eid = get_eid();
+
+    let input_string = serde_json::to_string(&*contract_input).unwrap();
+
+    let mut return_output_buf = vec![0; ENCLAVE_OUTPUT_BUF_MAX_LEN].into_boxed_slice();
+    let mut output_len : usize = 0;
+    let output_slice = &mut return_output_buf;
+    let output_ptr = output_slice.as_mut_ptr();
+    let output_len_ptr = &mut output_len as *mut usize;
+
+    let mut retval = sgx_status_t::SGX_SUCCESS;
+    let result = unsafe {
+        ecall_handle(
+            eid, &mut retval,
+            200,
+            input_string.as_ptr(), input_string.len(),
+            output_ptr, output_len_ptr, ENCLAVE_OUTPUT_BUF_MAX_LEN
+        )
+    };
+
+    match result {
+        sgx_status_t::SGX_SUCCESS => {
+            let output_slice = unsafe { std::slice::from_raw_parts(output_ptr, output_len) };
+            let output_value: serde_json::value::Value = serde_json::from_slice(output_slice).unwrap();
+            json!(output_value)
+        },
+        _ => {
+            error!("[-] ECALL Enclave Failed {}!", result.as_str());
+            json!({
+                "status": "error",
+                "payload": format!("[-] ECALL Enclave Failed {}!", result.as_str())
+            })
+        }
+    }
+}
+
 #[post("/kick")]
 fn kick() {
     // TODO: we should improve this
@@ -803,7 +843,7 @@ fn rocket() -> rocket::Rocket {
             test, init_runtime, get_info,
             dump_states, load_states,
             sync_header, dispatch_block, query,
-            set, get, get_runtime_info, test_ink]);
+            set, get, get_runtime_info, test_ink, test_lottery]);
 
     if *ENABLE_KICK_API {
         info!("ENABLE `kick` API");
